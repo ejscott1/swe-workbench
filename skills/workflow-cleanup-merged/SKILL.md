@@ -1,6 +1,7 @@
 ---
 name: workflow-cleanup-merged
 description: Use after a PR has been merged on GitHub to remove the local worktree, delete the local branch, delete the remote branch, and fast-forward local main — safely, with squash-merge support.
+orchestrator: true
 ---
 
 # Workflow: Cleanup Merged Branch
@@ -43,6 +44,24 @@ gh pr view <number> --json state,mergedAt,headRefName
 Read `state == "MERGED"` **and** `mergedAt != null`. Abort with a clear message if either condition fails.
 
 **Never use `git branch --merged` as a merge check.** GitHub's default squash-merge strategy creates a new commit SHA on `main`; the original branch tip is not a merge ancestor of `main`, so `git branch --merged` silently lies. `gh` is the only oracle that does not lie.
+
+### Worktree Provider Detection
+
+```sh
+# Prefer rimba MCP server when active in the session (no shell needed).
+# Otherwise resolve the binary: PATH first, then common install locations.
+RIMBA=$(command -v rimba 2>/dev/null \
+  || { [ -x "$HOME/.local/bin/rimba" ] && echo "$HOME/.local/bin/rimba"; } \
+  || { [ -x "$HOME/go/bin/rimba" ]     && echo "$HOME/go/bin/rimba"; } \
+  || true)
+```
+
+**rimba path (preferred):** If the rimba MCP server is active or `$RIMBA` is non-empty, skip Batch A and Batch B:
+1. Run `$RIMBA remove <headRefName>` (or the `remove` tool on the `rimba mcp` server) — handles worktree location, dirty/unpushed checks, and removal internally. For bulk stale-worktree cleanup (e.g., after a Mode C orchestration run), use `$RIMBA clean` instead.
+2. On failure, report the rimba error verbatim and abort. Do not proceed to branch deletion.
+3. (Once per repo) recommend the user run `rimba hook install` to automate future post-merge cleanups via a git hook — this removes the need for manual `/swe-workbench:cleanup-merged` invocations.
+
+**fallback path (rimba absent):** Execute Batch A → cwd-fix → Batch B as documented below.
 
 ### Batch A — Locate Worktree + Safety Checks
 
