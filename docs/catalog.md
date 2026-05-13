@@ -8,6 +8,7 @@
 | `/swe-workbench:security-review` | Alias for `/swe-workbench:review --mode security`. Kept for backward compat. |
 | `/swe-workbench:design <question>` | Consult the senior-engineer subagent for an architectural decision. |
 | `/swe-workbench:refactor <target>` | Behavior-preserving refactor via Fowler's catalog. |
+| `/swe-workbench:migrate <description>` | Multi-deployment migration via expand → backfill → dual-write → switch → contract. Use when a single revertable commit will not do. |
 | `/swe-workbench:debug <symptom>` | Diagnose a bug or failing test via systematic-debugging, then minimal fix + regression test. |
 | `/swe-workbench:test <target>` | Write focused, behavioural tests in the target language's idiom. |
 | `/swe-workbench:implement <ticket or description>` | Drive a feature end-to-end — branch, plan, TDD build, verify, review, PR. Orchestrates the full 5-phase `workflow-development` lifecycle. |
@@ -27,6 +28,7 @@
 | `test-writer` | Authoring tests for an existing function, module, or change set. |
 | `product-manager` | Drafts a well-framed GitHub issue from a raw idea — product framing (problem, value, RICE-lite), template detection, duplicate scan, and confirm gate. Invoked by `/swe-workbench:capture`. |
 | `tech-writer` | Generates README sections, ADRs, ARCHITECTURE/OVERVIEW, and non-obvious inline comments — style-aware, reads existing docs first. |
+| `migrator` | Plan and execute a multi-deployment migration: DB schema, framework upgrade, runtime, API/contract, or event-schema. Produces a five-phase (Expand → Backfill → Dual-write → Switch → Contract) plan with rollback gates. Invoked by `/swe-workbench:migrate`. |
 | `performance-tuner` | Profile-driven hotspot triage — ranks bottlenecks from a flame graph or benchmark and recommends targeted optimizations. Refuses speculative optimization without profiling evidence. |
 
 ## Skills
