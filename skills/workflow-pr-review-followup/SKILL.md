@@ -1,33 +1,30 @@
 ---
-name: workflow-pr-review
-description: Use when reviewing a remote GitHub PR — fetches into an ephemeral worktree, runs the reviewer agent with a Review Decision footer instruction, deduplicates findings against existing review threads (±5-line fuzzy match + Jaccard ≥ 0.4 against any author), posts new inline comments via gh-api, adds 👍 reactions on dedup matches, and submits the review with APPROVE or COMMENT. Counterpart of local-diff review (which workflow-development Phase 4 keeps using).
+name: workflow-pr-review-followup
+description: Use when a reviewer wants to re-check a PR after the owner has addressed feedback — re-runs the reviewer agent against the updated diff, deduplicates against existing threads (Jaccard ±5-line), posts only truly-new inline comments, and submits an APPROVE or COMMENT review event.
 orchestrator: true
 ---
 
-# Workflow: PR Review (remote-PR orchestration shell)
+# Workflow: PR Review Follow-up
 
-**Announce at start:** "I'm using the workflow-pr-review skill to review PR #N."
+**Announce at start:** "I'm using the workflow-pr-review-followup skill to re-check PR #N."
 
 ## When to invoke
 
-- The user passes a PR number to `/swe-workbench:review` (e.g. `/review 123`).
-- The user accepts the auto-detect prompt on `/review` no-arg ("Detected PR #N — review it? Reply `yes`").
-- An agent or command needs to "review this remote PR end-to-end" — fetch + analyse + post + submit.
-- Phrases: "review PR 123", "do a peer review of #456", "fetch this PR and post deduped comments".
+- The user runs `/swe-workbench:review --check-followup <N>`.
+- A reviewer has already posted a full review and wants to verify that their findings were addressed.
+- Phrases: "re-check PR 123", "check if my review comments were addressed", "follow up on review #456".
 
 ## When NOT to invoke
 
-- Local-diff review (working tree / staged / branch diff) → use `commands/review.md` no-arg directly. The command stays the entrypoint for local-diff mode.
-- `workflow-development` Phase 4 → keeps using local-diff review (no remote PR exists yet during implementation).
-- The user wants to post a single comment without running a full review → out of scope.
-- The PR is closed/merged → out of scope; reviews target open PRs.
+- Full first-pass review → use `swe-workbench:workflow-pr-review` instead.
+- The PR is closed/merged → out of scope.
 
 ## Composition
 
 This skill orchestrates; analysis is delegated to:
 
-- `swe-workbench:reviewer` subagent — produces `Severity | File:Line | Issue | Why | Fix` findings + a Review Decision footer (when instructed by this skill — see Step 4).
-- `swe-workbench:ticket-context` skill — prepended to the reviewer prompt when the PR body or commit messages reference a ticket key, atlassian/Confluence URL, or `#NNN` GitHub ref.
+- `swe-workbench:reviewer` subagent — produces `Severity | File:Line | Issue | Why | Fix` findings + a Review Decision footer.
+- `swe-workbench:ticket-context` skill — prepended when PR references a ticket key.
 
 ## 7-step flow
 
@@ -38,39 +35,45 @@ gh auth status >/dev/null || { echo "gh not authenticated. Run 'gh auth login'."
 CURRENT_USER=$(gh api /user -q .login)
 mkdir -p /tmp/swe-workbench-pr-review
 gh pr view "$PR" --json state,number,headRefName,baseRefName,headRepository,headRefOid,title,body,author \
-  > "/tmp/swe-workbench-pr-review/${PR}.json"
-[ -s "/tmp/swe-workbench-pr-review/${PR}.json" ] || { echo "PR #$PR not found or not accessible."; exit 1; }
+  > "/tmp/swe-workbench-pr-review/${PR}-followup.json"
+[ -s "/tmp/swe-workbench-pr-review/${PR}-followup.json" ] || { echo "PR #$PR not found or not accessible."; exit 1; }
 ```
 
-Extract `BASE`, `HEAD_SHA`, `OWNER`, `REPO`, and `AUTHOR_LOGIN` (from `author.login`) from the JSON for downstream steps.
+Extract `BASE`, `HEAD_SHA`, `OWNER`, `REPO`, and `AUTHOR_LOGIN` (from `author.login`) from the JSON. The state file is stored under `${PR}-followup.json` (distinct from `${PR}.json` used by the primary review) to allow both to coexist.
+
+Check that the PR is open before proceeding:
+```bash
+STATE=$(jq -r .state "/tmp/swe-workbench-pr-review/${PR}-followup.json")
+[ "$STATE" = "OPEN" ] || { echo "PR #$PR is $STATE — follow-up review only applies to open PRs."; exit 1; }
+```
 
 ### Step 2 — Ephemeral worktree
 
 **When rimba is available** (preferred — handles cross-fork remotes automatically and skips dep installation):
 
 ```bash
-RIMBA_OUT=$(rimba add pr:$PR --task "pr-review-$PR" --skip-deps --skip-hooks 2>&1)
+RIMBA_OUT=$(rimba add pr:$PR --task "pr-followup-$PR" --skip-deps --skip-hooks 2>&1)
 WT=$(echo "$RIMBA_OUT" | awk '/Path:/{print $2}')
 [ -d "$WT" ] || { echo "rimba add failed: $RIMBA_OUT"; exit 1; }
 ```
 
-rimba registers the task as `pr-review-<PR>` (overriding its default `review/<N>-<slug>` derivation) and places the worktree in the configured worktrees base directory. `--skip-deps` suppresses dep installation; `--skip-hooks` suppresses post-create hooks — both unnecessary for a read-only diff review.
+The task is named `pr-followup-$PR` (NOT `pr-review-$PR`) so cleanup of the primary-review worktree does not collide with this one. `--skip-deps` suppresses dep installation; `--skip-hooks` suppresses post-create hooks — both unnecessary for a read-only diff review.
 
 **When rimba is absent** (fallback — direct git, NOT `superpowers:using-git-worktrees` which is consent-gated for durable feature work):
 
 ```bash
-WT="/tmp/swe-workbench-pr-review/${PR}"
+WT="/tmp/swe-workbench-pr-review/${PR}-followup"
 if [ -d "$WT" ]; then
   git worktree remove --force "$WT" 2>/dev/null || rm -rf "$WT"
 fi
 mkdir -p "$(dirname "$WT")"
-git fetch origin "pull/${PR}/head:pr-review-${PR}" --force
-git worktree add --detach "$WT" "pr-review-${PR}"
+git fetch origin "pull/${PR}/head:pr-followup-${PR}" --force
+git worktree add --detach "$WT" "pr-followup-${PR}"
 ```
 
 ### Step 3 — Ticket-context chain
 
-Read `title` and `body` from the saved JSON. Match `[A-Z]+-\d+`, atlassian/Confluence URLs, or `#\d+`/PR refs in either field plus the last 5 commit messages (`git -C "$WT" log --oneline -5`). If matched, invoke `swe-workbench:ticket-context` and capture its summary as a prelude to the reviewer prompt.
+Identical to `workflow-pr-review` Step 3. Read `title` and `body` from the saved JSON. Match `[A-Z]+-\d+`, atlassian/Confluence URLs, or `#\d+`/PR refs in either field plus the last 5 commit messages. If matched, invoke `swe-workbench:ticket-context` and capture its summary as a prelude.
 
 ### Step 4 — Invoke `reviewer`
 
@@ -85,7 +88,7 @@ Pass the agent:
   > "Begin the review with a `## Review Summary` section: 2–4 sentences capturing overall posture, the strongest positives, and the most important concerns. The orchestrator uses these paragraphs as the top-level PR review body. Do not repeat per-finding detail there — that goes in the severity-grouped findings below."
 - Ticket-context prelude (if Step 3 produced one).
 
-Store the agent's complete text response as `REVIEWER_OUTPUT` before Step 7 runs — in practice the orchestrator assigns the subagent's full text reply to this variable. Step 7's awk block reads from it via `<<< "$REVIEWER_OUTPUT"`.
+Store the agent's complete text response as `REVIEWER_OUTPUT`.
 
 ### Step 5 — Parse decision footer
 
@@ -127,19 +130,17 @@ Do NOT clean up the worktree on abort — leave it for inspection.
            }
          }
        }
-     }' > "/tmp/swe-workbench-pr-review/${PR}-threads.json"
+     }' > "/tmp/swe-workbench-pr-review/${PR}-followup-threads.json"
    ```
-
-   Pagination via `pageInfo { endCursor hasNextPage }` if a real PR exceeds 100 threads.
 
 2. **For each new finding** (parsed from `Severity | File:Line | Issue | Why | Fix` row):
 
-   - **Fuzzy-match** against fetched threads, against ANY author (User Decision 2):
+   - **Fuzzy-match** against fetched threads, against ANY author:
      - Same `path`.
      - `|finding.line - thread.line| ≤ 5` (use `startLine` for multi-line ranges).
      - Body Jaccard token overlap ≥ 0.4 (cheap content-similarity proxy).
      - `isResolved == false`.
-   - **On match**: skip posting. If `$CURRENT_USER` has not already 👍'd (check `reactions.nodes[].user.login`; use `reactions(first: 20, ...)` — 5 truncates busy threads), add a 👍 to the thread head (first comment's `id`):
+   - **On match**: skip posting. If `$CURRENT_USER` has not already 👍'd (check `reactions.nodes[].user.login`), add a 👍 to the thread head (first comment's `id`):
 
      ```bash
      gh api graphql -F subjectId="$THREAD_HEAD_ID" -f query='
@@ -148,7 +149,7 @@ Do NOT clean up the worktree on abort — leave it for inspection.
        }'
      ```
 
-   - **On no match**: post a new inline comment via REST (supports `line=` directly):
+   - **On no match**: post a new inline comment via REST:
 
      ```bash
      gh api "repos/${OWNER}/${REPO}/pulls/${PR}/comments" \
@@ -174,14 +175,13 @@ NARRATIVE=$(awk '
 ' <<< "$REVIEWER_OUTPUT" | sed -e '/^[[:space:]]*$/d' -e '/^## Review Summary[[:space:]]*$/d')
 
 # $posted and $deduped are set in Step 6.
-BYLINE="_Reviewed by \`reviewer\` ([swe-workbench](https://github.com/${OWNER}/${REPO})). Posted ${posted} inline comments, deduped ${deduped}._"
+BYLINE="_Re-reviewed by \`reviewer\` ([swe-workbench](https://github.com/${OWNER}/${REPO})). Posted ${posted} inline comments, deduped ${deduped}._"
 
 if [ -n "$(echo "$NARRATIVE" | tr -d '[:space:]')" ]; then
   SUMMARY=$(printf '## Review Summary\n\n%s\n\nDetailed feedback in inline comments.\n\n**Review Decision: %s**\n\n---\n%s\n' \
     "$NARRATIVE" "$DECISION" "$BYLINE")
 else
-  # Fallback: no prose above the findings table — use the legacy one-liner.
-  SUMMARY="Reviewed by \`reviewer\` (swe-workbench). Posted $posted inline comments, deduped $deduped."
+  SUMMARY="Re-reviewed by \`reviewer\` (swe-workbench). Posted $posted inline comments, deduped $deduped."
 fi
 ```
 
@@ -191,24 +191,23 @@ Submit per the parsed decision:
 
 **Never** use `--request-changes`.
 
-**Address-feedback CTA (conditional):** After the submit call succeeds, if `CURRENT_USER != AUTHOR_LOGIN` (i.e., the reviewer is not also the PR author), append:
+**Address-feedback CTA (conditional):** After the submit call succeeds, if `CURRENT_USER != AUTHOR_LOGIN`, append:
 
 > "Want me to help the PR owner address this feedback? Reply `yes` to start `/address-feedback <N>`."
 
-Suppress this CTA silently when `CURRENT_USER == AUTHOR_LOGIN` — self-review is a legitimate flow; asking the author if they want to address their own feedback is noise.
+Suppress this CTA silently when `CURRENT_USER == AUTHOR_LOGIN`.
 
 Cleanup non-blocking:
 ```bash
-( rimba remove "pr-review-$PR" --force 2>/dev/null \
+( rimba remove "pr-followup-$PR" --force 2>/dev/null \
   || { git worktree remove --force "$WT" 2>/dev/null; \
-       git branch -D "pr-review-$PR" 2>/dev/null; \
+       git branch -D "pr-followup-$PR" 2>/dev/null; \
        rm -rf "$WT" 2>/dev/null; } ) &
 ```
 
-`rimba remove` deletes both the worktree and the local `pr-review-<N>` branch (task name pinned via `--task` in Step 2 to keep it consistent). The `git worktree remove` + `git branch -D` group is the defensive fallback for rimba-absent or rimba-failure environments.
-
 ## Footer parsing contract
 
+Identical to `workflow-pr-review`:
 - Regex: `^\*\*Review Decision:\s+(APPROVE|COMMENT)\*\*$`
 - Source: scan ALL non-blank lines of agent output.
 - Abort cases (do NOT submit, preserve worktree):
@@ -218,38 +217,33 @@ Cleanup non-blocking:
 
 ## Dedup contract
 
-A new finding `(path, line, body)` matches an existing thread `T` IFF:
+Identical to `workflow-pr-review`:
 1. `T.path == finding.path` (exact, repo-relative).
 2. `|T.line - finding.line| ≤ 5` (if `T.startLine` is null, use `T.line`; otherwise use `T.startLine`).
 3. Jaccard overlap of word tokens between `T.comments[0].body` and `finding.body` ≥ 0.4.
 4. `T.isResolved == false`.
 
-Match against ANY author (User Decision 2). On match, skip posting AND add 👍 to the thread head if our user hasn't already reacted.
+Match against ANY author. On match, skip posting AND add 👍 to the thread head if our user hasn't already reacted.
 
 ## Failure modes
 
 | Failure | Signal | Action |
 |---|---|---|
 | `gh auth status` fails | Non-zero exit | Abort. Print fix hint. |
-| PR not open / 404 | `gh pr view` fails | Abort. Print PR URL if known. |
+| PR not open / 404 | `gh pr view` fails | Abort. |
 | `git fetch pull/N/head` fails | Non-zero exit | Abort. Do not create worktree. |
-| Reviewer aborts mid-scan | Agent error | Skip submit. **Leave worktree** for inspection (do not remove). |
+| Reviewer aborts mid-scan | Agent error | Skip submit. **Leave worktree** for inspection. |
 | Decision footer missing or malformed | Regex no-match | Abort with explicit message. Worktree preserved. |
 | Comment-post returns 422 (line out of range) | HTTP 422 | Skip that finding, log "skipped (line out of range)", continue. |
 | All POSTs returned 422 (stale `commit_id` — PR head advanced between Step 1 and Step 6) | `posted == 0` AND every finding skipped with 422 | Re-fetch `HEAD_SHA` via `gh pr view "$PR" --json headRefOid -q .headRefOid` and retry once. If still failing, abort with "HEAD_SHA mismatch — PR updated mid-review". |
 | All findings dedup-matched | `posted == 0` | Submit with body "no new findings — all previously raised". Decision footer still respected. |
-| GraphQL pagination needed (PR > 100 threads) | `hasNextPage == true` | Loop with `after: endCursor`. Document as known limit if not implemented in v1. |
+| GraphQL pagination needed (PR > 100 threads) | `hasNextPage == true` | Document as known v1 limit. |
 
 ## Common mistakes
 
 | Mistake | Fix |
 |---|---|
-| Use `superpowers:using-git-worktrees` for the PR worktree | That skill is consent-gated and durable-feature-oriented. Use `rimba add pr:$PR --task "pr-review-$PR" --skip-deps --skip-hooks` when rimba is available; direct `git worktree add` otherwise. |
-| Forget repo-relative-path instruction | GitHub comment positioning requires repo-relative paths. The agent will emit `$WT/...` paths otherwise — comments won't anchor. |
-| Skip the footer instruction | Without it, the agent does NOT emit the footer (per its `## Decision footer (when instructed)` block). Step 5 will then abort. |
-| Use `--request-changes` | Never. APPROVE / COMMENT only. The agent footer never produces this value. |
-| Parse threads from REST `pulls/{N}/comments` | REST returns review-comment-by-comment; threading is reconstructed by the GraphQL `reviewThreads` shape. Use GraphQL to fetch, REST to post. |
-| Force-add 👍 to your own existing comment | Check `reactions.nodes[].user.login` first; skip if you've already reacted. |
-| Block on cleanup | Cleanup runs in background `(... ) &`. Don't `wait` for it. |
-| Skip the narrative instruction in Step 4 | Without it, the reviewer does NOT emit `## Review Summary` (per its `## Review Summary (when instructed)` block). Step 7 falls back to the legacy one-liner silently — body is not wrong but loses the prose narrative. |
-| Emit the address-feedback CTA when `CURRENT_USER == AUTHOR_LOGIN` | Always suppress for self-review — asking the author if they want to address their own feedback is noise. Only emit the CTA when `CURRENT_USER != AUTHOR_LOGIN`. |
+| Use `--task "pr-review-$PR"` for the worktree | Use `--task "pr-followup-$PR"` to avoid colliding with a still-active primary-review worktree. |
+| Omit the footer instruction in Step 4 | Without it, the agent does NOT emit the footer. Step 5 will then abort. |
+| Forget repo-relative-path instruction | GitHub comment positioning requires repo-relative paths. The agent will emit `$WT/...` paths otherwise. |
+| Emit the address-feedback CTA when `CURRENT_USER == AUTHOR_LOGIN` | Always suppress for self-review. |
