@@ -85,7 +85,7 @@ Pass the agent:
 - Footer instruction (load-bearing — opt-in per the agent's `## Decision footer (when instructed)` block):
   > "End the review with EXACTLY ONE of `**Review Decision: APPROVE**` or `**Review Decision: COMMENT**` on its own line, no prefix or trailing text. Never `REQUEST_CHANGES`."
 - Narrative instruction (load-bearing — opt-in per the agent's `## Review Summary (when instructed)` block):
-  > "Begin the review with a `## Review Summary` section: 2–4 sentences capturing overall posture, the strongest positives, and the most important concerns. The orchestrator uses these paragraphs as the top-level PR review body. Do not repeat per-finding detail there — that goes in the severity-grouped findings below."
+  > "Begin the review with a `## Review Summary` section: 2–4 sentences capturing overall posture, the strongest positives, and the most important concerns. When the reviewer is not the PR author, the orchestrator uses these paragraphs as the top-level PR review body; otherwise the narrative is shown in the Claude session only and not posted to GitHub. Do not repeat per-finding detail there — that goes in the severity-grouped findings below."
 - Ticket-context prelude (if Step 3 produced one).
 
 Store the agent's complete text response as `REVIEWER_OUTPUT`.
@@ -173,21 +173,36 @@ NARRATIVE=$(awk '
   /^\*\*Review Decision:/ { exit }
   { print }
 ' <<< "$REVIEWER_OUTPUT" | sed -e '/^[[:space:]]*$/d' -e '/^## Review Summary[[:space:]]*$/d')
+HAS_NARRATIVE="$([ -n "$(echo "$NARRATIVE" | tr -d '[:space:]')" ] && echo true || echo false)"
+if [ -z "$CURRENT_USER" ] || [ -z "$AUTHOR_LOGIN" ]; then
+  echo "[warn] IS_SELF_REVIEW: identity unknown (CURRENT_USER='$CURRENT_USER' AUTHOR_LOGIN='$AUTHOR_LOGIN'); treating as cross-author." >&2
+  IS_SELF_REVIEW=false
+elif [ "$CURRENT_USER" = "$AUTHOR_LOGIN" ]; then
+  IS_SELF_REVIEW=true
+else
+  IS_SELF_REVIEW=false
+fi
 
 # $posted and $deduped are set in Step 6.
 BYLINE="_Re-reviewed by \`reviewer\` ([swe-workbench](https://github.com/lugassawan/swe-workbench)). Posted ${posted} inline comments, deduped ${deduped}._"
 
-if [ -n "$(echo "$NARRATIVE" | tr -d '[:space:]')" ]; then
+if [ "$HAS_NARRATIVE" = true ] && [ "$IS_SELF_REVIEW" = false ]; then
   SUMMARY=$(printf '## Review Summary\n\n%s\n\nDetailed feedback in inline comments.\n\n**Review Decision: %s**\n\n---\n%s\n' \
     "$NARRATIVE" "$DECISION" "$BYLINE")
-else
+elif [ "$IS_SELF_REVIEW" = false ]; then
+  # No narrative but cross-author: post just the byline.
   SUMMARY="$BYLINE"
+else
+  # Self-review: nothing posted to GitHub; inline comments speak for themselves.
+  SUMMARY=""
 fi
 ```
 
-Submit per the parsed decision:
+Submit only when `IS_SELF_REVIEW = false` — GitHub blocks self-approval, and for self-review the Step 6 inline comments are sufficient without a review-event body:
 - `APPROVE` → `gh pr review "$PR" --approve --body "$SUMMARY"`
 - `COMMENT` → `gh pr review "$PR" --comment --body "$SUMMARY"`
+
+When `IS_SELF_REVIEW = true`, skip the review-event submission entirely.
 
 **Never** use `--request-changes`.
 
@@ -246,4 +261,6 @@ Match against ANY author. On match, skip posting AND add 👍 to the thread head
 | Use `--task "pr-review-$PR"` for the worktree | Use `--task "pr-followup-$PR"` to avoid colliding with a still-active primary-review worktree. |
 | Omit the footer instruction in Step 4 | Without it, the agent does NOT emit the footer. Step 5 will then abort. |
 | Forget repo-relative-path instruction | GitHub comment positioning requires repo-relative paths. The agent will emit `$WT/...` paths otherwise. |
+| Skip the narrative instruction in Step 4 | Without it, the reviewer does NOT emit `## Review Summary` (per its `## Review Summary (when instructed)` block). Step 7 falls back to the BYLINE-only branch silently — body is not wrong but loses the prose narrative for cross-author reviews (self-review intentionally produces BYLINE-only; see "Post `## Review Summary` on self-review" row). |
 | Emit the address-feedback CTA when `CURRENT_USER == AUTHOR_LOGIN` | Always suppress for self-review. |
+| Post `## Review Summary` on self-review | Step 7 gates narrative inclusion on `IS_SELF_REVIEW = false` — same policy axis as the address-feedback CTA suppression above. The narrative is still presented in the author's Claude session; only the GitHub-posted body is BYLINE-only. |
