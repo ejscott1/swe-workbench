@@ -53,6 +53,7 @@ Also check CLAUDE.md for project-specific conventions.
 
 - `branch-convention` — from `git branch -a`
 - `commit-style` — from `git log --oneline -20`
+- `imports-command` — from Makefile `imports` target or language-marker fallback below
 - `format-command` — from Makefile `format` target or language-marker fallback below
 - `lint-command` — from Makefile `lint` target or language-marker fallback below
 - `test-command` — from Makefile `test` target or language-marker fallback below
@@ -60,12 +61,13 @@ Also check CLAUDE.md for project-specific conventions.
 
 **Language marker fallback (if no Makefile):**
 
-| Marker | Format | Lint | Test |
-|--------|--------|------|------|
-| `go.mod` | `gofmt -w .` | `golangci-lint run` | `go test ./...` |
-| `package.json` | check `scripts.format`/`prettier` | check `scripts.lint`/`eslint` | check `scripts.test` |
-| `Cargo.toml` | `cargo fmt` | `cargo clippy` | `cargo test` |
-| `pyproject.toml` | `ruff format` or `black .` | `ruff check` | `pytest` |
+| Marker | Imports | Format | Lint | Test |
+|--------|---------|--------|------|------|
+| `go.mod` | `goimports -w .` | `gofmt -w .` | `golangci-lint run` | `go test ./...` |
+| `package.json` | `npx organize-imports-cli` (always works); or `eslint --fix` if `eslint-plugin-import` / `@typescript-eslint/consistent-type-imports` configured | check `scripts.format`/`prettier` | check `scripts.lint`/`eslint` | check `scripts.test` |
+| `Cargo.toml` | `cargo fix --allow-dirty` (removes unused imports — review output before staging); configure `imports_granularity` in `rustfmt.toml` then `cargo fmt` | `cargo fmt` | `cargo clippy` | `cargo test` |
+| `pyproject.toml` | `ruff check --select I --fix` (legacy: `isort .` + `autoflake -r --remove-all-unused-imports .`) | `ruff format` or `black .` | `ruff check` | `pytest` |
+| `pom.xml` | `mvn spotless:apply` (requires import-ordering rules in Spotless config; for unused-import removal add `impsort-maven-plugin`) | `mvn spotless:apply` | `mvn checkstyle:check` (requires plugin; Gradle: `./gradlew check`) | `mvn test` |
 
 **PR template:** check `cat .github/pull_request_template.md 2>/dev/null` (and common variants: `.github/PULL_REQUEST_TEMPLATE.md`, `docs/pull_request_template.md`). If found, record the **absolute path** — pass it to `gh pr create --body-file <path>` in Phase 5. Before invoking, replace the literal `Closes #` placeholder with the resolved issue (`Closes #123`) or remove it and write a standalone `Issue: N/A — <one-line reason>` line. Never leave `Closes #` empty.
 
@@ -145,11 +147,15 @@ Commit logically grouped changes as you go. Never bundle unrelated changes.
 
 ### Phase 3: Verify
 
-**Goal:** Confirm format, lint, and test all pass with evidence.
+**Goal:** Confirm imports, format, lint, and test all pass with evidence.
+
+Run in order — **Imports → Format → Lint → Test**. Imports come first because organizers
+(`goimports`, `ruff check --select I --fix`, `organize-imports-cli`, `spotless`) reshape lines that
+the formatter then normalises; reversing the order causes spurious rewrites on the next pass.
 
 Invoke `superpowers:verification-before-completion`.
 
-**Skip condition:** If Phase 2 sub-skill already ran full verification (format + lint + test) with evidence, mark as "completed by sub-skill" and proceed.
+**Skip condition:** If Phase 2 sub-skill already ran full verification (imports + format + lint + test) with evidence, mark as "completed by sub-skill" and proceed.
 
 ---
 
@@ -179,6 +185,15 @@ Invoke `swe-workbench:workflow-commit-and-pr`.
 
 ---
 
+## Optional deeper passes
+
+Two existing skills provide deeper verification when warranted — invoke ad hoc outside the 5-phase core loop:
+
+- `swe-workbench:workflow-codebase-audit` — multi-axis structural audit. Run pre-release or when onboarding a new codebase.
+- `swe-workbench:security-review` — depth-first OWASP / secret-leak review. Run pre-merge for diffs touching auth, input parsing, secrets, or network surfaces.
+
+---
+
 ## Plan-Time Behavior (Mode A)
 
 **Gate:** Before rendering the Workflow section, confirm the plan introduces file edits (fix / make / implement). If the plan is a pure design recommendation or analysis with no codebase changes, return without modifying the plan.
@@ -196,7 +211,7 @@ When writing or finalizing a plan, add a `## Workflow` section using the templat
 |-------|---------|----------------|
 | 1 | Tests fail on baseline → report, ask to proceed | When caller passes `skip-phase-1: <rationale>` — branch already exists (e.g. invoked by `workflow-extend`) |
 | 2 | Implementation blocked → stop, ask for clarification | Never |
-| 3 | Verification fails → fix, re-run from format | Sub-skill verified with evidence |
+| 3 | Verification fails → fix, re-run from imports | Sub-skill verified with evidence |
 | 4 | Critical review issues → fix, re-verify, re-review | Sub-skill reviewed with evidence |
 | 5 | Push/PR fails → diagnose, report | Never |
 
@@ -207,7 +222,7 @@ When writing or finalizing a plan, add a `## Workflow` section using the templat
 | Mistake | Fix |
 |---------|-----|
 | Skip verification, go straight to review | Always verify first (Phase 3 before 4) |
-| Run only tests (skip format/lint) | Run all three, in order |
+| Run only tests (skip imports/format/lint) | Run all four, in order |
 | Single giant commit | Group by logical change |
 | Guess at branch/commit conventions | Detect from `git branch -a` and `git log` first |
 | Plan that introduces file edits without Workflow section | Always add the Workflow section (Mode A) — skip only for pure design / analysis output |
