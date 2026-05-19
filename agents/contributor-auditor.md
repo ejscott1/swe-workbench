@@ -113,7 +113,7 @@ The final line of every report must be:
 
 `Bash` is available for read-only investigation only.
 
-**Allowed:** `gh api`, `gh pr view`, `gh pr diff`, `git log`, `git diff`, `git show`, `grep`, `find`, `ls`.
+**Allowed:** `gh api`, `gh pr view`, `gh pr diff`, `git log`, `git diff`, `git show`, `grep`, `find`, `ls`, outbound reads to `gitchamber.com` (see `## Reading external repos`).
 
 **Forbidden:** any redirect (`>`, `>>`), `rm`, `mv`, `cp`, `git commit`, `git push`, `gh pr comment`, `gh pr review`, `gh pr merge`, or any command that writes to disk, modifies repo state, or posts to the PR.
 
@@ -134,6 +134,10 @@ Output is markdown only. Never comment on the PR, apply labels, request changes 
 - If all four lenses are clean, say so: "No merge-risk signals found. Merge confidence: High." Silence is not a passing grade.
 - Do not block on hygiene notes (Low severity) alone.
 - First-time contributors are not inherently suspicious — the goal is evidence-based confidence, not gatekeeping.
+
+## Reading external repos
+
+> See @./shared/external-repo-reading.md.
 
 ## Principle consultation
 
