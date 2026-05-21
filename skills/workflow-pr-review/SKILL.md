@@ -37,12 +37,25 @@ This skill orchestrates; analysis is delegated to:
 gh auth status >/dev/null || { echo "gh not authenticated. Run 'gh auth login'."; exit 1; }
 CURRENT_USER=$(gh api /user -q .login)
 mkdir -p /tmp/swe-workbench-pr-review
-gh pr view "$PR" --json state,number,headRefName,baseRefName,headRepository,headRefOid,title,body,author \
+gh pr view "$PR" --json state,number,headRefName,baseRefName,headRefOid,title,body,author \
   > "/tmp/swe-workbench-pr-review/${PR}.json"
 [ -s "/tmp/swe-workbench-pr-review/${PR}.json" ] || { echo "PR #$PR not found or not accessible."; exit 1; }
 ```
 
-Extract `BASE`, `HEAD_SHA`, `OWNER`, `REPO`, and `AUTHOR_LOGIN` (from `author.login`) from the JSON for downstream steps.
+Extract fields from the JSON:
+
+```bash
+JSON="/tmp/swe-workbench-pr-review/${PR}.json"
+BASE=$(jq -r .baseRefName "$JSON")
+HEAD_SHA=$(jq -r .headRefOid "$JSON")
+AUTHOR_LOGIN=$(jq -r .author.login "$JSON")
+OWNER=$(gh repo view --json owner -q .owner.login)
+REPO=$(gh repo view --json name   -q .name)
+if [ -z "$OWNER" ] || [ "$OWNER" = "null" ] || [ -z "$REPO" ] || [ "$REPO" = "null" ]; then
+  echo "Could not determine base repo owner/name. Run 'gh repo view' to verify the current remote is set correctly." >&2
+  exit 1
+fi
+```
 
 ### Step 2 — Ephemeral worktree
 

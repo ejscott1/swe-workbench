@@ -75,3 +75,47 @@ def test_followup_skill_documents_stale_commit_retry():
         "SKILL.md failure modes must document the stale commit_id retry: "
         "re-fetch HEAD_SHA via headRefOid when all POSTs return 422"
     )
+
+
+def test_followup_skill_owner_repo_from_gh_repo_view():
+    """OWNER and REPO must be derived from 'gh repo view' (not from headRepository or baseRepository)."""
+    text = SKILL_MD.read_text()
+    assert re.search(r"OWNER\s*=.*\$\(gh repo view[^\n]*owner", text), (
+        "SKILL.md must derive OWNER via 'gh repo view --json owner' — "
+        "gh pr view --json has no baseRepository field; gh repo view resolves the base remote correctly"
+    )
+    assert re.search(r"REPO\s*=.*\$\(gh repo view[^\n]*name", text), (
+        "SKILL.md must derive REPO via 'gh repo view --json name' — "
+        "gh pr view --json has no baseRepository field; gh repo view resolves the base remote correctly"
+    )
+
+
+def test_followup_skill_no_invalid_json_field():
+    """Step 1 gh pr view --json must NOT include baseRepository (it is not a valid gh CLI field)."""
+    text = SKILL_MD.read_text()
+    assert not re.search(r"gh pr view[^\n]*--json[^\n]*baseRepository", text), (
+        "SKILL.md must not use baseRepository in gh pr view --json — "
+        "that field is unsupported and causes gh to exit with 'Unknown JSON field'"
+    )
+
+
+def test_followup_skill_no_fragile_owner_extraction():
+    """SKILL.md must not contain fragile Python-dict or headRepository-owner extraction patterns."""
+    text = SKILL_MD.read_text()
+    assert "['owner']['login']" not in text, (
+        "SKILL.md must not contain Python-dict extraction ['owner']['login'] — "
+        "this pattern threw KeyError on fork PRs where headRepository lacks an owner key"
+    )
+    assert not re.search(r"headRepository[^`\n]*owner[^`\n]*login", text), (
+        "SKILL.md must not reference headRepository.owner.login — "
+        "use gh repo view instead"
+    )
+
+
+def test_followup_skill_has_owner_repo_guard_clause():
+    """SKILL.md must include a guard clause that exits if OWNER or REPO cannot be determined."""
+    text = SKILL_MD.read_text()
+    assert re.search(r"Could not determine base repo owner", text), (
+        "SKILL.md must include the guard-clause error message for missing OWNER/REPO "
+        "so fork-PR failures produce an actionable error rather than silently misrouting API calls"
+    )
